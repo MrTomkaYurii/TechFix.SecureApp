@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TechFix.Application/TechFix.Application.csproj" />
+    <Project Path="src/TechFix.Domain/TechFix.Domain.csproj" />
+    <Project Path="src/TechFix.Infrastructure/TechFix.Infrastructure.csproj" />
+    <Project Path="src/TechFix.WebApi/TechFix.WebApi.csproj" />
+  </Folder>
+</Solution>
