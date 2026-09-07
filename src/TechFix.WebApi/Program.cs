@@ -44,6 +44,7 @@ builder.Services.AddDbContext<TechFixDbContext>(options =>
 
 // 4. Register Clean Architecture Application/Infrastructure Services
 builder.Services.AddScoped<IInjectionService, InjectionService>();
+builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 
 // 5. Configure CORS
 builder.Services.AddCors(options =>
@@ -66,6 +67,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 // 7. Configure HTTP pipeline
+app.UseStaticFiles();
 app.UseSwagger();
 app.UseSwaggerUI(c =>
 {
