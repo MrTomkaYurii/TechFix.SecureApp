@@ -46,6 +46,7 @@ builder.Services.AddDbContext<TechFixDbContext>(options =>
 builder.Services.AddScoped<IInjectionService, InjectionService>();
 builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 builder.Services.AddScoped<IXxeService, XxeService>();
+builder.Services.AddScoped<IAccessControlService, AccessControlService>();
 
 // 5. Configure CORS
 builder.Services.AddCors(options =>
