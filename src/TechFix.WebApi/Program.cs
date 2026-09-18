@@ -48,6 +48,7 @@ builder.Services.AddScoped<IAuthenticationService, AuthenticationService>();
 builder.Services.AddScoped<IXxeService, XxeService>();
 builder.Services.AddScoped<IAccessControlService, AccessControlService>();
 builder.Services.AddScoped<ISecurityMisconfigService, SecurityMisconfigService>();
+builder.Services.AddScoped<IXssService, XssService>();
 
 // 5. Configure CORS
 builder.Services.AddCors(options =>
