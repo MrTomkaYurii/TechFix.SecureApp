@@ -123,6 +123,7 @@ public async Task<List<PartDto>> SearchPartsSecureSqlAsync(string query)
 
 ### 3.2. Числова SQL-ін'єкція (Numeric SQL Injection — CWE-89)
 
+
 Опис вразливості: Вразливість виникає, коли числовий первинний ключ деталі приймається з маршруту запиту як нетипізований рядок (string rawId) і підставляється безпосередньо у вираз WHERE Id = {rawId} без обрамлення лапками.
 
 
@@ -237,6 +238,46 @@ public async Task<string> ExecuteDiagnosticPingSecureAsync(string hostOrIp)
 
 ### 3.4. Впровадження HTML-розмітки та фреймів (HTML / iFrame Injection — CWE-80)
 
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Пряма конкатенація коментаря користувача у відповідь без санітизації (CWE-80). Дозволяє вбудувати теги для спотворення сторінки чи фішингу.
+
+```csharp
+public Task<string> RenderFeedbackVulnerableHtmlAsync(HtmlInjectionRequest request)
+    {
+        // Небезпечно: вставка сирих рядків у HTML шаблон
+        var html = $@"
+<div class=""feedback-card"" style=""border: 1px solid #ccc; padding: 10px; margin: 10px 0;"">
+    <h3 style=""color: #2b5797;"">Клієнт: {request.ClientName}</h3>
+    <p class=""comment"">{request.Comment}</p>
+    <small>Статус: Перевірено публічно</small>
+</div>";
+        return Task.FromResult(html);
+    }
+```
+
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Обов'язкове контекстне екранування через HtmlEncoder.Default.Encode().
+
+```csharp
+public Task<string> RenderFeedbackSecureHtmlAsync(HtmlInjectionRequest request)
+    {
+        var safeClientName = HtmlEncoder.Default.Encode(request.ClientName);
+        var safeComment = HtmlEncoder.Default.Encode(request.Comment);
+
+        var html = $@"
+<div class=""feedback-card"" style=""border: 1px solid #ccc; padding: 10px; margin: 10px 0;"">
+    <h3 style=""color: #2b5797;"">Клієнт: {safeClientName}</h3>
+    <p class=""comment"">{safeComment}</p>
+    <small>Статус: Безпечно екрановано за стандартом Anti-XSS</small>
+</div>";
+        return Task.FromResult(html);
+    }
+```
+
+
 Опис вразливості: У модулі публічних відгуків клієнтів коментарі відображаються на сторінці сервісу. У вразливому методі коментар клієнта підставляється в HTML-шаблон без попередньої санітизації та віддається клієнту з заголовком Content-Type: text/html.
 
 
@@ -274,6 +315,55 @@ return Content(html, "text/html");
 
 
 ### 3.5. Ін'єкція поштових заголовків (SMTP CRLF Injection — CWE-93)
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Відсутність перевірки на символи повернення каретки (\r) та переведення рядка (\n). Дозволяє розірвати заголовки та додати приховану копію Bcc:.
+
+```csharp
+public Task<string> SendNotificationVulnerableSmtpAsync(MailHeaderInjectionRequest request)
+    {
+        // Демонстрація сирого пакету SMTP протоколу
+        var rawSmtpMessage = 
+$"MAIL FROM: <no-reply@techfix.tntu.edu.ua>\r\n" +
+$"RCPT TO: <{request.ToEmail}>\r\n" +
+$"DATA\r\n" +
+$"From: TechFix Service <support@techfix.tntu.edu.ua>\r\n" +
+$"To: {request.ToEmail}\r\n" +
+$"Subject: {request.Subject}\r\n\r\n" +
+$"{request.MessageBody}\r\n.\r\n";
+
+        return Task.FromResult($"[VULNERABLE SMTP SERVER LOG] RAW PROTOCOL PACKET TRANSMITTED:\n{rawSmtpMessage}");
+    }
+```
+
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Валідація вхідних рядків регулярним виразом або перевіркою Contains("\r") || Contains("\n") із поверненням винятку чи помилки.
+
+```csharp
+public Task<string> SendNotificationSecureSmtpAsync(MailHeaderInjectionRequest request)
+    {
+        if (request.ToEmail.Contains('\r') || request.ToEmail.Contains('\n') ||
+            request.Subject.Contains('\r') || request.Subject.Contains('\n'))
+        {
+            return Task.FromResult("Security Alert: CRLF Injection detected in email headers (\\r or \\n found). Message rejected.");
+        }
+
+        // Сувора перевірка синтаксису адреси
+        var isEmailValid = Regex.IsMatch(request.ToEmail, @"^[^@\s]+@[^@\s]+\.[^@\s]+$");
+        if (!isEmailValid)
+        {
+            return Task.FromResult("Security Alert: Invalid recipient email syntax.");
+        }
+
+        var safeSmtpLog = 
+$"[SECURE SMTP CLIENT] Dispatched successfully to validated recipient <{request.ToEmail}> with Subject '{request.Subject}'. Headers sanitized against CRLF.";
+        return Task.FromResult(safeSmtpLog);
+    }
+```
+
 
 Опис вразливості: У формі відправки повідомлень клієнту про готовність ремонту несанітизовані значення полів To та Subject використовуються при генерації команд SMTP протоколу.
 

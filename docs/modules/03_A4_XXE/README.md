@@ -125,7 +125,64 @@ public Task<XmlOrderParseResponseDto> ParseOrderXmlSecureAsync(string xmlContent
 *Рисунок 3.3 — Блокування XXE-ін'єкції (HTTP 400 Security Alert / DtdProcessing.Prohibit) у Swagger UI*
 
 
-### 3.2. Сліпі XXE-атаки та несанкціоновані зовнішні запити (Blind XXE / Out-of-Band SSRF — CWE-918)
+### 3.2. Сліпі XXE-атаки
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Парсер намагається завантажити зовнішній DTD за вказаним HTTP URL, виконуючи запит від імені сервера у внутрішню мережу (SSRF).
+
+```csharp
+public Task<XmlOrderParseResponseDto> ProcessBlindXxeVulnerableAsync(string xmlContent)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var xmlDoc = new XmlDocument();
+            xmlDoc.XmlResolver = new XmlUrlResolver();
+
+            using var stringReader = new StringReader(xmlContent);
+            using var xmlReader = XmlReader.Create(stringReader, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Parse,
+                XmlResolver = new XmlUrlResolver()
+            });
+
+            xmlDoc.Load(xmlReader);
+            sw.Stop();
+
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = true,
+                Message = "Blind XXE виконано: парсер намагався надіслати зовнішній HTTP-запит (Out-Of-Band SSRF) за адресою, вказаною в SYSTEM сутності.",
+                SecurityMode = "Vulnerable (OOB SSRF Initiated)",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = false,
+                Message = $"Blind XXE виконання (Out-of-Band запит згенеровано): {ex.Message}",
+                SecurityMode = "Vulnerable",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Блокування зовнішніх мережевих резолверів та перевірка вхідного XML на наявність зовнішніх URI посилань.
+
+```csharp
+public Task<XmlOrderParseResponseDto> ProcessBlindXxeSecureAsync(string xmlContent)
+    {
+        return ParseOrderXmlSecureAsync(xmlContent);
+    }
+```
+ та несанкціоновані зовнішні запити (Blind XXE / Out-of-Band SSRF — CWE-918)
 
 Опис загрози: У випадках, коли сервер парсить XML, але не повертає отримані значення безпосередньо у тілі HTTP-відповіді, зловмисники застосовують техніку Blind XXE (Out-of-Band Data Exfiltration). Зовнішня сутність змушує XML-парсер відправити HTTP- або FTP-запит на контрольований атакувальником сервер (наприклад, стенд WebWolf на порту 9090).
 
@@ -153,7 +210,103 @@ Secure Code Remediation: Встановлення XmlResolver = null гаран�
 *Рисунок 3.5 — Блокування Blind XXE та SSRF у захищеному ендпоінті Swagger UI через заборону DTD*
 
 
-### 3.3. Атаки відмови в обслуговуванні через експоненційне розгортання сутностей (Billion Laughs XML Bomb — CWE-776)
+### 3.3. Атаки відмови в обслуговуванні
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Відсутність обмеження на рекурсивне розгортання вкладених сутностей XML, що призводить до вичерпання гігабайтів оперативної пам'яті за секунди.
+
+```csharp
+public Task<XmlOrderParseResponseDto> ProcessXmlBombDosVulnerableAsync(string xmlBomb)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            // Небезпечне експоненційне розгортання вкладених сутностей (CWE-776: Billion Laughs Attack)
+            var xmlDoc = new XmlDocument();
+            xmlDoc.XmlResolver = new XmlUrlResolver();
+
+            using var stringReader = new StringReader(xmlBomb);
+            using var xmlReader = XmlReader.Create(stringReader, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Parse,
+                MaxCharactersFromEntities = 0 // 0 означає відсутність обмежень на розмір розгорнутих сутностей!
+            });
+
+            xmlDoc.Load(xmlReader);
+            sw.Stop();
+
+            var textSample = xmlDoc.DocumentElement?.InnerText ?? "";
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = true,
+                Message = $"УВАГА: XML-бомбу успішно розгорнуто в пам'яті! Результуючий розмір символів: {textSample.Length}. Створено критичне навантаження на CPU та RAM.",
+                SecurityMode = "Vulnerable (Denial of Service - Exponential Entity Expansion)",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = false,
+                Message = $"Billion Laughs спровокував виняток пам'яті/ресурсів: {ex.Message}",
+                SecurityMode = "Vulnerable",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Встановлення суворого обмеження MaxCharactersFromEntities (наприклад, 1024 символи) та відключення DTD.
+
+```csharp
+public Task<XmlOrderParseResponseDto> ProcessXmlBombDosSecureAsync(string xmlBomb)
+    {
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            // Безпечні налаштування: жорсткий ліміт на кількість символів з сутностей
+            var secureSettings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit, // або обмеження MaxCharactersFromEntities = 1024
+                XmlResolver = null,
+                MaxCharactersFromEntities = 1024,
+                MaxCharactersInDocument = 10000
+            };
+
+            using var stringReader = new StringReader(xmlBomb);
+            using var xmlReader = XmlReader.Create(stringReader, secureSettings);
+
+            var xmlDoc = new XmlDocument();
+            xmlDoc.Load(xmlReader);
+            sw.Stop();
+
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = true,
+                Message = "XML опрацьовано безпечно.",
+                SecurityMode = "Secure",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+        catch (XmlException ex)
+        {
+            sw.Stop();
+            return Task.FromResult(new XmlOrderParseResponseDto
+            {
+                Success = false,
+                Message = $"Security Alert: XML Bomb (Billion Laughs DoS) заблоковано! Виняток: {ex.Message}",
+                SecurityMode = "Secure (DoS Neutralized)",
+                ExecutionTimeMs = sw.ElapsedMilliseconds
+            });
+        }
+    }
+```
+ через експоненційне розгортання сутностей (Billion Laughs XML Bomb — CWE-776)
 
 Опис загрози: Атака 'Billion Laughs' полягає у визначенні каскаду вкладених внутрішніх сутностей (lol1 містить 10 lol, lol2 містить 10 lol1 і так далі). При розмірі вихідного XML-файлу менше ніж 1 КБ його розгортання в пам'яті вимагає понад 3 ГБ оперативної пам'яті та 100% завантаження процесора, що призводить до негайного аварійного падіння процесу веб-сервера (OutOfMemoryException / Denial of Service).
 

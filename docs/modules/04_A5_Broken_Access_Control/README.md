@@ -98,7 +98,88 @@ public async Task<AccessControlResponseDto> GetBasketSecureAsync(int basketId, i
 *Рисунок 4.3 — Блокування несанкціонованого доступу (HTTP 403 Forbidden / IDOR Neutralized) у Swagger UI*
 
 
-### 3.2. Несанкціонована модифікація чужих кошиків (IDOR Basket Manipulation — CWE-639)
+### 3.2. Несанкціонована модифікація
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Дозволяється передача від'ємної кількості або довільної ціни товару прямо з клієнта без перевірки власника кошика.
+
+```csharp
+public async Task<AccessControlResponseDto> AddItemToBasketVulnerableAsync(int basketId, AddBasketItemRequestDto item)
+    {
+        var basket = await _context.Baskets.Include(b => b.Items).FirstOrDefaultAsync(b => b.Id == basketId);
+        if (basket == null) return new AccessControlResponseDto { Success = false, Message = "Кошик не знайдено." };
+
+        var part = await _context.Parts.FindAsync(item.PartId);
+        if (part == null) return new AccessControlResponseDto { Success = false, Message = "Товар не знайдено." };
+
+        var newItem = new BasketItem
+        {
+            BasketId = basket.Id,
+            PartId = part.Id,
+            PartName = part.Name,
+            UnitPrice = part.Price,
+            Quantity = item.Quantity
+        };
+
+        _context.BasketItems.Add(newItem);
+        await _context.SaveChangesAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = $"[IDOR ВРАЗЛИВІСТЬ]: Товар '{part.Name}' успішно додано до чужого кошика {basketId} користувача '{basket.UserFullName}' без авторизації!",
+            Data = newItem,
+            SecurityMode = "Vulnerable"
+        };
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Валідація прав доступу до кошика, сувора перевірка Quantity > 0 та визначення актуальної ціни товару виключно з бази даних на сервері.
+
+```csharp
+public async Task<AccessControlResponseDto> AddItemToBasketSecureAsync(int basketId, AddBasketItemRequestDto item, int currentUserId)
+    {
+        var basket = await _context.Baskets.FirstOrDefaultAsync(b => b.Id == basketId);
+        if (basket == null) return new AccessControlResponseDto { Success = false, Message = "Кошик не знайдено." };
+
+        if (basket.UserId != currentUserId)
+        {
+            return new AccessControlResponseDto
+            {
+                Success = false,
+                Message = $"Security Alert: Відхилено спробу модифікації чужого кошика! Користувач {currentUserId} не має права додавати товари до кошика {basketId}.",
+                SecurityMode = "Secure (Unauthorized Manipulation Blocked)"
+            };
+        }
+
+        var part = await _context.Parts.FindAsync(item.PartId);
+        if (part == null) return new AccessControlResponseDto { Success = false, Message = "Товар не знайдено." };
+
+        var newItem = new BasketItem
+        {
+            BasketId = basket.Id,
+            PartId = part.Id,
+            PartName = part.Name,
+            UnitPrice = part.Price,
+            Quantity = item.Quantity
+        };
+
+        _context.BasketItems.Add(newItem);
+        await _context.SaveChangesAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = "Товар успішно додано до вашого кошика після перевірки прав доступу.",
+            Data = newItem,
+            SecurityMode = "Secure"
+        };
+    }
+```
+ чужих кошиків (IDOR Basket Manipulation — CWE-639)
 
 Опис вразливості: Аналогічна вразливість виникає під час додавання товарів до кошика. Якщо сервіс приймає basketId з URL і не верифікує сесію покупця, зловмисник може наповнювати кошики інших користувачів небажаними або дорогими товарами, спотворюючи баланси та замовлення.
 
@@ -113,7 +194,73 @@ Secure Code Remediation: Захищений метод здійснює обов
 *Рисунок 4.5 — Відхилення спроби модифікації чужого кошика у захищеному ендпоінті Swagger UI*
 
 
-### 3.3. Підміна авторства відгуків клієнтів (Parameter Tampering / Impersonation — CWE-284)
+### 3.3. Підміна авторства
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Ім'я автора або ідентифікатор автора відгуку беруться прямо з тіла запиту, дозволяючи зловмиснику залишати коментарі від імені адміністратора.
+
+```csharp
+public async Task<AccessControlResponseDto> SubmitFeedbackVulnerableAsync(FeedbackSubmitRequestDto request)
+    {
+        // ВРАЗЛИВІСТЬ (CWE-284: Improper Access Control / Impersonation)
+        // АНТИПАТЕРН: Довіра до переданого клієнтом ідентифікатора UserId та імені ClientName
+        var feedback = new CustomerFeedback
+        {
+            ClientName = request.ClientName,
+            Email = request.Email,
+            Rating = request.Rating,
+            Comment = request.Comment
+        };
+
+        _context.Feedbacks.Add(feedback);
+        await _context.SaveChangesAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = $"[УРАЗЛИВІСТЬ ПІДМІНИ ОСОБИ]: Відгук опубліковано від імені користувача '{request.ClientName}' (UserId: {request.UserId}). Довіра до параметрів клієнта дозволила спуфінг відгуку!",
+            Data = feedback,
+            SecurityMode = "Vulnerable (User Impersonation)"
+        };
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Ігнорування вхідного поля автора; ім'я та ID користувача встановлюються виключно з серверної сесії авторизованого користувача.
+
+```csharp
+public async Task<AccessControlResponseDto> SubmitFeedbackSecureAsync(FeedbackSubmitRequestDto request, int currentUserId)
+    {
+        // ЗАХИЩЕНА РЕАЛІЗАЦІЯ: Ігнорування клієнтського UserId, обов'язкове вилучення ідентичності з захищеного контексту сесії/JWT
+        var currentUser = await _context.Users.FindAsync(currentUserId);
+        if (currentUser == null)
+        {
+            return new AccessControlResponseDto { Success = false, Message = "Неавтентифікований користувач." };
+        }
+
+        var feedback = new CustomerFeedback
+        {
+            ClientName = currentUser.Username, // Жорстка прив'язка до автентифікованого користувача
+            Email = currentUser.Email,
+            Rating = request.Rating,
+            Comment = request.Comment
+        };
+
+        _context.Feedbacks.Add(feedback);
+        await _context.SaveChangesAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = $"Відгук безпечно зареєстровано. Авторство гарантовано автентифікованим обліковим записом '{currentUser.Username}' (UserId: {currentUserId}). Підміна особи неможлива.",
+            Data = feedback,
+            SecurityMode = "Secure"
+        };
+    }
+```
+ відгуків клієнтів (Parameter Tampering / Impersonation — CWE-284)
 
 Опис вразливості: У модулі публічних відгуків користувач відправляє оцінку та коментар. У вразливому варіанті контролер сліпо приймає поля UserId та ClientName безпосередньо з JSON-тіла запиту, що дозволяє будь-кому публікувати фейкові негативні чи образливі відгуки під іменем адміністратора чи інших клієнтів (Спуфінг авторства).
 
@@ -159,7 +306,72 @@ var feedback = new CustomerFeedback
 *Рисунок 4.7 — Захищена реєстрація відгуку: підміна особи неможлива, авторство захищено*
 
 
-### 3.4. Приховані функції та відсутність перевірки привілеїв (Security through Obscurity — CWE-285)
+### 3.4. Приховані функції
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Захист адміністративної панелі покладається лише на секретний URL (/hidden-admin-secret-portal) без перевірки ролі користувача.
+
+```csharp
+public async Task<AccessControlResponseDto> GetHiddenAdminPortalVulnerableAsync()
+    {
+        // ВРАЗЛИВІСТЬ (CWE-285: Missing Function Level Access Control / Relying on Obscurity)
+        // Ендпоінт просто прихований у меню сайту, але не має жодної перевірки прав на сервері
+        var allUsers = await _context.Users.Select(u => new
+        {
+            u.Id,
+            u.Username,
+            u.Email,
+            u.Role,
+            u.PasswordHash
+        }).ToListAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = "[ВРАЗЛИВІСТЬ ОБСКУРАНТИЗМУ]: Доступ до прихованої секції адміністратора надано без перевірки ролей! Розкрито всіх користувачів та їхні хеші.",
+            Data = allUsers,
+            SecurityMode = "Vulnerable (Security through Obscurity)"
+        };
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Обов'язкова рольова авторизація [Authorize(Roles = "Admin")] або перевірка userRole == "Admin" з поверненням HTTP 403 Forbidden.
+
+```csharp
+public async Task<AccessControlResponseDto> GetHiddenAdminPortalSecureAsync(string userRole)
+    {
+        // ЗАХИЩЕНА РЕАЛІЗАЦІЯ: Рольова перевірка (Role-Based Access Control - RBAC)
+        if (!string.Equals(userRole, "Admin", StringComparison.OrdinalIgnoreCase))
+        {
+            return new AccessControlResponseDto
+            {
+                Success = false,
+                Message = $"Security Alert: 403 Forbidden. Поточна роль '{userRole}' не має доступу до цієї адміністративної функції. Потрібна роль 'Admin'.",
+                SecurityMode = "Secure (RBAC Enforced)"
+            };
+        }
+
+        var allUsers = await _context.Users.Select(u => new
+        {
+            u.Id,
+            u.Username,
+            u.Email,
+            u.Role
+        }).ToListAsync();
+
+        return new AccessControlResponseDto
+        {
+            Success = true,
+            Message = "Адміністративний доступ підтверджено на основі перевірки ролі Admin.",
+            Data = allUsers,
+            SecurityMode = "Secure"
+        };
+    }
+```
+ та відсутність перевірки привілеїв (Security through Obscurity — CWE-285)
 
 Опис вразливості: Помилкове припущення про те, що 'якщо посилання на сторінку немає в меню сайту, зловмисник його не знайде' (Security through Obscurity). У вразливому ендпоінті /hidden-admin-data/vulnerable відсутні атрибути авторизації, що дозволяє анонімному користувачу отримати список облікових записів та їхні хеші.
 

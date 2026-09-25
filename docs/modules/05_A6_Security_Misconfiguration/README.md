@@ -149,6 +149,71 @@ public async Task<IActionResult> AuditSecurityHeadersSecure()
 
 ### 3.2. Дослідження витоку стек-трейсів (CWE-209)
 
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Необроблений виняток повертає клієнту технічний стек викликів CLR, версію ОС, шлях до вихідних файлів на диску та SQL-запит (CWE-209).
+
+```csharp
+public Task<object> TriggerErrorVulnerableAsync(string trigger)
+    {
+        // ВРАЗЛИВІСТЬ (CWE-209: Generation of Error Message Containing Sensitive Information)
+        // Необроблений виняток викидає стек викликів, локальні шляхи до файлів C:\OneDrive\...
+        // та внутрішній текст SQL запиту безпосередньо у відповідь клієнту
+        if (trigger == "sql_fail")
+        {
+            throw new InvalidOperationException(
+                "Database Query Failure: Fatal error in TechFixDbContext.Parts.FromSqlRaw(\"SELECT * FROM NonExistentTable_Production\"). " +
+                "Connection String: Data Source=C:\\OneDrive\\ТНТУ ПУЛЮЯ\\3 семестр\\techfix_security.db;Mode=ReadWrite; " +
+                "Internal StackTrace: at TechFix.Infrastructure.Services.SecurityMisconfigService.TriggerErrorVulnerableAsync line 42.");
+        }
+
+        if (trigger == "null_ref")
+        {
+            string? nullObj = null;
+            var len = nullObj!.Length; // NullReferenceException
+        }
+
+        return Task.FromResult<object>(new { Message = "Помилку не викликано. Спробуйте trigger=sql_fail або trigger=null_ref." });
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Впровадження стандарту RFC 7807 ProblemDetails із генерацією IncidentTrackingId (CorrelationId) та приховуванням технічних деталей.
+
+```csharp
+public Task<object> TriggerErrorSecureAsync(string trigger)
+    {
+        // ЗАХИЩЕНА РЕАЛІЗАЦІЯ (RFC 7807 ProblemDetails + Correlation Trace Identifier)
+        // Внутрішні технічні деталі логуються на сервері, а клієнту віддається знеособлений код помилки
+        var correlationId = Guid.NewGuid().ToString("N")[..8].ToUpper();
+
+        try
+        {
+            if (trigger == "sql_fail" || trigger == "null_ref")
+            {
+                throw new InvalidOperationException("Internal simulation failure");
+            }
+
+            return Task.FromResult<object>(new { Success = true, Message = "Операція успішна." });
+        }
+        catch (Exception)
+        {
+            // У реальному бекенді тут виконується _logger.LogError(ex, "TraceId: {CorrelationId}", correlationId);
+            return Task.FromResult<object>(new
+            {
+                Type = "https://tools.ietf.org/html/rfc7807",
+                Title = "An unexpected error occurred while processing your request.",
+                Status = 500,
+                IncidentTrackingId = $"ERR-TNTU-{correlationId}",
+                UserMessage = "Виникла внутрішня помилка сервера. Будь ласка, повідомте службу підтримки за ідентифікатором інциденту.",
+                SecurityPolicy = "Stack trace and sensitive system paths are strictly withheld from client response (CWE-209 Neutralized)."
+            });
+        }
+    }
+```
+
+
 
 ![Рис. 2. Уразливий запит: витік повного CLR стек-трейсу та шляхів файлової системи сервера](./screenshots/02_swagger_stacktrace_vulnerable.png)
 *Рис. 2. Уразливий запит: витік повного CLR стек-трейсу та шляхів файлової системи сервера*
@@ -164,6 +229,68 @@ public async Task<IActionResult> AuditSecurityHeadersSecure()
 
 ### 3.3. Дослідження доступу до резервних копій (CWE-530)
 
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Відкритий публічний доступ до файлів резервних копій (.bak, .dump, .kdbx) без автентифікації та контролю доступу (CWE-530).
+
+```csharp
+public Task<BackupDownloadResponseDto> AccessBackupFileVulnerableAsync(string fileName)
+    {
+        // ВРАЗЛИВІСТЬ (CWE-552: Files or Directories Accessible to External Parties)
+        // Дозвіл завантаження резервних копій бази даних, конфігурацій чи сховищ паролів (.bak, .kdbx, .json)
+        if (fileName.Contains("techfix_backup") || fileName.Contains(".bak") || fileName.Contains(".kdbx"))
+        {
+            return Task.FromResult(new BackupDownloadResponseDto
+            {
+                Success = true,
+                FileName = fileName,
+                Message = "[КРИТИЧНА ВРАЗЛИВІСТЬ КОНФІГУРАЦІЇ]: Сервер надав прямий публічний доступ до резервної копії файлу (CWE-552)!",
+                ContentPreview = "KDBX4_DATABASE_HEADER\nMasterKeyHash: Caoimhe_SupportKeyFile\nEncryptedDatabase: AES256-GCM\n[DATABASE_DUMP_USERS]: admin, student, jerry, support_agent",
+                SecurityMode = "Vulnerable (Sensitive File Exposure)"
+            });
+        }
+
+        return Task.FromResult(new BackupDownloadResponseDto
+        {
+            Success = false,
+            FileName = fileName,
+            Message = "Файл не знайдено."
+        });
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Зберігання бекапів поза межами WebRoot, повне блокування прямих HTTP-запитів до розширень архівів та повернення HTTP 403 Forbidden.
+
+```csharp
+public Task<BackupDownloadResponseDto> AccessBackupFileSecureAsync(string fileName)
+    {
+        // ЗАХИЩЕНА РЕАЛІЗАЦІЯ: Чорний список небезпечних розширень та заборона доступу до бекапів
+        var blockedExtensions = new[] { ".bak", ".kdbx", ".db", ".sqlite", ".config", ".env", ".json" };
+        bool isBlocked = blockedExtensions.Any(ext => fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase));
+
+        if (isBlocked)
+        {
+            return Task.FromResult(new BackupDownloadResponseDto
+            {
+                Success = false,
+                FileName = fileName,
+                Message = "Security Alert: 403 Forbidden. Доступ до резервних копій, конфігурацій та баз даних суворо заборонено політикою веб-сервера.",
+                SecurityMode = "Secure (Static Files Hardened)"
+            });
+        }
+
+        return Task.FromResult(new BackupDownloadResponseDto
+        {
+            Success = false,
+            FileName = fileName,
+            Message = "Доступ заблоковано."
+        });
+    }
+```
+
+
 
 ![Рис. 4. Уразливий запит: несанкціоноване завантаження дампа бази даних database_backup.bak](./screenshots/04_swagger_backup_download_vulnerable.png)
 *Рис. 4. Уразливий запит: несанкціоноване завантаження дампа бази даних database_backup.bak*
@@ -178,6 +305,48 @@ public async Task<IActionResult> AuditSecurityHeadersSecure()
 
 
 ### 3.4. Дослідження витоку конфіденційних даних у коментарях (CWE-615)
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Залишення у відповідях API службових налагоджувальних коментарів розробників із тестовими паролями та внутрішніми URL (CWE-615).
+
+```csharp
+public Task<object> GetSupportCredentialsLeakVulnerableAsync()
+    {
+        // ВРАЗЛИВІСТЬ (CWE-615: Inclusion of Sensitive Information in Source Code Comments)
+        // Залишені коментарі розробників у JavaScript/HTML, які розкривають облікові дані підтримки
+        return Task.FromResult<object>(new
+        {
+            ClientScript = "https://techfix.tntu.edu.ua/assets/js/support-bundle.js",
+            ExposedHtmlComments = new[]
+            {
+                "<!-- @echipa de suport: Secretul nostru comun este încă Caoimhe cu parola de master gol! -->",
+                "// TODO: Remove before production: support_agent / KlintIstvud3130 (Station: TNTU-122)",
+                "/* Internal note: Diagnostic endpoint accessible at /api/A5_AccessControl/hidden-admin-data */"
+            },
+            Vulnerability = "Коментарі розробників у клієнтських скриптах розкривають паролі та внутрішні алгоритми (Juice Shop / WebGoat pattern)."
+        });
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Автоматична санітизація вихідного контенту конвеєром ASP.NET Core та вилучення розробницьких артефактів перед відправкою клієнту.
+
+```csharp
+public Task<object> GetSupportCredentialsLeakSecureAsync()
+    {
+        // ЗАХИЩЕНА РЕАЛІЗАЦІЯ: Мініфікація, обфускація та автоматичне очищення коментарів у CI/CD
+        return Task.FromResult<object>(new
+        {
+            ClientScript = "https://techfix.tntu.edu.ua/assets/js/support-bundle.min.js",
+            CommentsStatus = "Cleaned & Stripped during Production Build Pipeline",
+            SecretsScanning = "GitHub Secret Scanning & SonarQube verified 0 hardcoded comments/credentials.",
+            SecurityMode = "Secure (Automated Secret Hygiene)"
+        });
+    }
+```
+
 
 
 ![Рис. 6. Уразливий запит: витік налагоджувальних коментарів, тестових токенів та внутрішніх URL](./screenshots/06_swagger_developer_comments_vulnerable.png)

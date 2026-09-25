@@ -169,7 +169,122 @@ public Task<string> LogoutSecureAsync(LogoutRequestDto request)
 *Рисунок 2.5 — Захищений логаут у Swagger UI: серверне внесення токена до списку відкликаних (Revocation)*
 
 
-### 3.3. Атаки перебором паролів та захист від перебору (Brute Force & User Enumeration — CWE-307, CWE-204)
+### 3.3. Атаки перебором паролів
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Відсутність обмеження кількості спроб входу (Rate Limiting) та інформативні повідомлення про помилку, що дозволяють перебирати імена користувачів (User Enumeration).
+
+```csharp
+public async Task<BruteForceResponseDto> LoginBruteForceVulnerableAsync(BruteForceLoginRequestDto request)
+    {
+        // ВРАЗЛИВІСТЬ 1: Відсутність затримки та обмеження частоти запитів (No Rate Limiting)
+        // ВРАЗЛИВІСТЬ 2: Розкриття наявності користувача в базі через різні повідомлення про помилки (CWE-204)
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+
+        if (user == null)
+        {
+            return new BruteForceResponseDto
+            {
+                Success = false,
+                Message = $"Помилка: Користувача '{request.Username}' не існує в системі!",
+                SecurityAdvice = "ВРАЗЛИВІСТЬ: Система розкриває факт неіснування користувача (User Enumeration)."
+            };
+        }
+
+        if (user.PasswordHash != request.Password && request.Password != "JerrySecret99" && request.Password != "Passw0rd!")
+        {
+            return new BruteForceResponseDto
+            {
+                Success = false,
+                Message = $"Помилка: Невірний пароль для користувача '{request.Username}'. Спробуйте ще раз.",
+                SecurityAdvice = "ВРАЗЛИВІСТЬ: Зловмисник знає, що логін вірний і може нескінченно перебирати паролі."
+            };
+        }
+
+        return new BruteForceResponseDto
+        {
+            Success = true,
+            Message = $"Успішний злам/вхід! Пароль для '{request.Username}' підібрано успішно.",
+            SecurityAdvice = "Атака повним перебором (Brute Force / Dictionary Attack) увінчалася успіхом."
+        };
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Автоматичне тимчасове блокування облікового запису (Account Lockout) після 3 невдалих спроб та знеособлені повідомлення про невірний логін/пароль.
+
+```csharp
+public async Task<BruteForceResponseDto> LoginBruteForceSecureAsync(BruteForceLoginRequestDto request)
+    {
+        var key = $"{request.ClientIp}_{request.Username.ToLower()}";
+        var now = DateTime.UtcNow;
+
+        var state = AttemptTracker.GetOrAdd(key, _ => (0, now, null));
+
+        // 1. Перевірка статусу блокування акаунта (Lockout Mechanism)
+        if (state.LockoutEnd.HasValue && state.LockoutEnd.Value > now)
+        {
+            var remaining = (int)(state.LockoutEnd.Value - now).TotalSeconds;
+            return new BruteForceResponseDto
+            {
+                Success = false,
+                IsLockedOut = true,
+                LockoutRemainingSeconds = remaining,
+                Message = $"Security Alert: Акаунт тимчасово заблоковано через перевищення ліміту помилкових спроб. Спробуйте через {remaining} сек.",
+                SecurityAdvice = "ЗАХИСТ: Активовано автоматичне блокування облікового запису (Account Lockout Policy)."
+            };
+        }
+
+        // Скидання лічильника, якщо попередні невдалі спроби були більше ніж 2 хвилини тому
+        if ((now - state.LastAttempt).TotalMinutes > 2)
+        {
+            state = (0, now, null);
+        }
+
+        // Штучна безпечна затримка для нівелювання таймінг-атак (Constant-time response)
+        await Task.Delay(300);
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+        bool isValid = user != null && (request.Password == "JerrySecret99" || request.Password == "Passw0rd!");
+
+        if (!isValid)
+        {
+            int newAttempts = state.Attempts + 1;
+            DateTime? lockoutUntil = null;
+
+            if (newAttempts >= 3)
+            {
+                lockoutUntil = now.AddMinutes(5); // Блокування на 5 хвилин
+            }
+
+            AttemptTracker[key] = (newAttempts, now, lockoutUntil);
+
+            return new BruteForceResponseDto
+            {
+                Success = false,
+                AttemptNumber = newAttempts,
+                IsLockedOut = lockoutUntil.HasValue,
+                LockoutRemainingSeconds = lockoutUntil.HasValue ? 300 : 0,
+                // ЗАХИСТ 2: Уніфіковане повідомлення про помилку (Generic Error Message)
+                Message = "Помилка автентифікації: Невірний логін або пароль.",
+                SecurityAdvice = $"Зафіксовано невдалу спробу {newAttempts} з 3. Ліміт запитів та політика блокування діють."
+            };
+        }
+
+        // Скидання лічильника при успішному вході
+        AttemptTracker.TryRemove(key, out _);
+
+        return new BruteForceResponseDto
+        {
+            Success = true,
+            Message = $"Успішний безпечний вхід для '{request.Username}'. Лічильник невдалих спроб скинуто.",
+            SecurityAdvice = "ЗАХИСТ: Вхід успішний з дотриманням політики безпеки."
+        };
+    }
+```
+ та захист від перебору (Brute Force & User Enumeration — CWE-307, CWE-204)
 
 Опис вразливості: Коли система повертає різні повідомлення для неіснуючого логіна ('Користувача не існує') та невірного пароля ('Невірний пароль для даного користувача'), зловмисник отримує змогу скласти точний словник валідних облікових записів (User Enumeration). Відсутність ліміту запитів дозволяє здійснювати автоматизований підбір зі швидкістю тисяч спроб на секунду.
 
@@ -233,7 +348,107 @@ public async Task<BruteForceResponseDto> LoginBruteForceSecureAsync(BruteForceLo
 *Рисунок 2.7 — Спрацювання політики блокування (HTTP 429 Too Many Requests / Account Lockout) у Swagger UI*
 
 
-### 3.4. Адміністративні портали та підміна ідентифікаторів у Cookie (CWE-565, CWE-287)
+### 3.4. Адміністративні портали
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Перевірка привілеїв адміністратора на основі звичайного непідписаного cookie (IsAdmin=true), який зловмисник може самостійно встановити в браузері.
+
+```csharp
+public Task<AdminPortalResponseDto> AccessAdminPortalVulnerableAsync(string? cookieHeader, string? roleHeader)
+    {
+        // ВРАЗЛИВІСТЬ: Небезпечна перевірка непідписаного клієнтського cookie (admin=1 або admin=true)
+        // або заголовка X-User-Role (CWE-287 / CWE-565)
+        bool isAdminCookie = !string.IsNullOrEmpty(cookieHeader) &&
+            (cookieHeader.Contains("admin=1") || cookieHeader.Contains("admin=true") || cookieHeader.Contains("role=admin"));
+
+        bool isAdminHeader = !string.IsNullOrEmpty(roleHeader) &&
+            roleHeader.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+
+        if (isAdminCookie || isAdminHeader)
+        {
+            return Task.FromResult(new AdminPortalResponseDto
+            {
+                AccessGranted = true,
+                Message = "УВАГА: Несанкціонований доступ до панелі адміністратора надано через модифікацію cookie 'admin=1' (CWE-565)!",
+                AuthenticatedAs = "Anonymous Hacker",
+                Role = "Admin (Falsified via Client Cookie/Header)",
+                ConfidentialData = new
+                {
+                    TechFixTotalRevenue2026 = "14,850,000 UAH",
+                    ActiveRepairsCount = 142,
+                    DbConnectionString = "Data Source=techfix_security.db;Mode=ReadWriteCreate",
+                    MasterEncryptionKey = "AES256-SUPER-SECRET-MASTER-KEY-TNTU-CYBER"
+                }
+            });
+        }
+
+        return Task.FromResult(new AdminPortalResponseDto
+        {
+            AccessGranted = false,
+            Message = "403 Forbidden: Доступ дозволено виключно адміністраторам сервісу. Встановіть Cookie: admin=1 для обходу.",
+            Role = "Guest"
+        });
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Авторизація на основі криптографічно підписаного JWT токена із перевіркою валідності підпису та ролі в захищеному контексті ClaimsPrincipal.
+
+```csharp
+public Task<AdminPortalResponseDto> AccessAdminPortalSecureAsync(string? authHeader)
+    {
+        // ЗАХИСТ: Сувора валідація підписаного сервером JWT токена
+        if (string.IsNullOrEmpty(authHeader) || !authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.FromResult(new AdminPortalResponseDto
+            {
+                AccessGranted = false,
+                Message = "401 Unauthorized: Відсутній або некоректний заголовок Authorization: Bearer <token>.",
+                Role = "Unauthenticated"
+            });
+        }
+
+        var token = authHeader["Bearer ".Length..].Trim();
+        var verifyResult = VerifyJwtStrict(token);
+
+        if (!verifyResult.IsValid)
+        {
+            return Task.FromResult(new AdminPortalResponseDto
+            {
+                AccessGranted = false,
+                Message = $"403 Forbidden: {verifyResult.ErrorMessage}",
+                Role = "InvalidToken"
+            });
+        }
+
+        if (verifyResult.Role != "Admin")
+        {
+            return Task.FromResult(new AdminPortalResponseDto
+            {
+                AccessGranted = false,
+                Message = $"403 Forbidden: Користувач '{verifyResult.Username}' має роль '{verifyResult.Role}', але для доступу потрібна роль 'Admin'.",
+                Role = verifyResult.Role
+            });
+        }
+
+        return Task.FromResult(new AdminPortalResponseDto
+        {
+            AccessGranted = true,
+            Message = "Доступ успішно авторизовано на основі криптографічно перевіреного JWT токена (Role: Admin).",
+            AuthenticatedAs = verifyResult.Username,
+            Role = "Admin (Verified via HMAC-SHA256)",
+            ConfidentialData = new
+            {
+                TechFixTotalRevenue2026 = "14,850,000 UAH",
+                ActiveRepairsCount = 142,
+                AuthorizationMethod = "RFC 7519 Compliant Signed JWT Token"
+            }
+        });
+    }
+```
+ та підміна ідентифікаторів у Cookie (CWE-565, CWE-287)
 
 Опис вразливості: У вразливих системах перевірка привілеїв адміністратора нерідко ґрунтується на наявності простих клієнтських прапорців у HTTP-заголовках або Cookie (наприклад, Cookie: admin=1 або Cookie: role=admin). Оскільки клієнт має повний контроль над своїми запитами, зловмисник може самостійно встановити цей прапорець і отримати доступ до критичних функцій.
 
@@ -288,7 +503,81 @@ public Task<AdminPortalResponseDto> AccessAdminPortalSecureAsync(string? authHea
 *Рисунок 2.9 — Захищений адмін-портал у Swagger UI: успішна авторизація за підписаним токеном*
 
 
-### 3.5. Фальсифікація JWT токенів та атака видалення підпису (alg: none — CVE-2015-9235)
+### 3.5. Фальсифікація JWT токенів
+
+#### ❌ Що недобре зроблено в коді (Вразлива реалізація / Антипатерн):
+
+Антипатерн: Бібліотека JWT приймає токени з заголовком alg: none без перевірки підпису (CVE-2015-9235), що дозволяє підробити будь-які клейми.
+
+```csharp
+public Task<object> VerifyJwtVulnerableAsync(string token)
+    {
+        try
+        {
+            var parts = token.Split('.');
+            if (parts.Length < 2) return Task.FromResult<object>(new { IsValid = false, Message = "Невірний формат JWT." });
+
+            var headerJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[0]));
+            var payloadJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
+
+            using var headerDoc = JsonDocument.Parse(headerJson);
+            var alg = headerDoc.RootElement.TryGetProperty("alg", out var algProp) ? algProp.GetString() : "";
+
+            // ВРАЗЛИВІСТЬ: Якщо клієнт надіслав alg: "none", сервер повністю пропускає перевірку підпису!
+            if (string.Equals(alg, "none", StringComparison.OrdinalIgnoreCase) || parts.Length == 2 || string.IsNullOrEmpty(parts[2]))
+            {
+                using var payloadDoc = JsonDocument.Parse(payloadJson);
+                var user = payloadDoc.RootElement.GetProperty("sub").GetString();
+                var role = payloadDoc.RootElement.TryGetProperty("role", out var r) ? r.GetString() : "User";
+
+                return Task.FromResult<object>(new
+                {
+                    IsValid = true,
+                    VulnerabilityWarning = "КРИТИЧНА ВРАЗЛИВІСТЬ (CVE-2015-9235): Токен прийнято без перевірки цифрового підпису, оскільки alg='none'!",
+                    Username = user,
+                    ClaimedRole = role,
+                    AccessGranted = role == "Admin",
+                    Payload = JsonSerializer.Deserialize<object>(payloadJson)
+                });
+            }
+
+            return Task.FromResult<object>(new { IsValid = false, Message = "Перевірка стандартного підпису не реалізована у вразливому ендпоінті." });
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult<object>(new { IsValid = false, Error = ex.Message });
+        }
+    }
+```
+
+#### ✅ Як зробити правильно (Захищена реалізація / Remediation):
+
+Remediation: Сувора вимога алгоритму підпису HMAC-SHA256 (HS256) та обов'язкова верифікація криптографічного підпису секретним ключем сервера.
+
+```csharp
+public Task<object> VerifyJwtSecureAsync(string token)
+    {
+        var res = VerifyJwtStrict(token);
+        if (!res.IsValid)
+        {
+            return Task.FromResult<object>(new
+            {
+                IsValid = false,
+                SecurityEnforcement = "Токен відхилено: сувора перевірка HMAC-SHA256 підпису та заборона непідписаних токенів (alg: none).",
+                Error = res.ErrorMessage
+            });
+        }
+
+        return Task.FromResult<object>(new
+        {
+            IsValid = true,
+            SecurityEnforcement = "Криптографічний підпис HMAC-SHA256 успішно підтверджено секретним ключем сервера.",
+            Username = res.Username,
+            Role = res.Role
+        });
+    }
+```
+ та атака видалення підпису (alg: none — CVE-2015-9235)
 
 Опис вразливості: Специфікація RFC 7519 передбачає можливість використання алгоритму 'none' для налагоджувальних цілей без цифрового підпису. Якщо бібліотека або власний парсер JWT на бекенді сліпо довіряє полю 'alg' у заголовку токена, зловмисник може взяти легітимний токен, змінити роль на 'Admin', замінити 'alg' на 'none', видалити частину підпису і надіслати підроблений токен серверу. Сервер пропустить верифікацію підпису і надасть максимальні привілеї.
 
