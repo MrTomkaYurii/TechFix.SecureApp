@@ -51,6 +51,7 @@ builder.Services.AddScoped<ISecurityMisconfigService, SecurityMisconfigService>(
 builder.Services.AddScoped<IXssService, XssService>();
 builder.Services.AddScoped<IDeserializationService, DeserializationService>();
 builder.Services.AddScoped<IComponentSecurityService, ComponentSecurityService>();
+builder.Services.AddScoped<ILoggingMonitoringService, LoggingMonitoringService>();
 
 // 5. Configure CORS
 builder.Services.AddCors(options =>
