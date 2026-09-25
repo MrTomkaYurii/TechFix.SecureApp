@@ -93,7 +93,7 @@ public class A1_InjectionController : ControllerBase
 
     /// <summary>
     /// Демонстрація виконання команд операційної системи (Вразливий метод)
-    /// Тестовий пейлоад: 127.0.0.1 & whoami або 127.0.0.1 & dir
+    /// Тестовий пейлоад: 127.0.0.1 &amp; whoami або 127.0.0.1 &amp; dir
     /// </summary>
     [HttpPost("command-ping/vulnerable")]
     public async Task<IActionResult> PingVulnerable([FromBody] CommandInjectionRequest request)
